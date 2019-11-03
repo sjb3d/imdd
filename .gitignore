@@ -1,0 +1,7 @@
+*~
+*.sublime-*
+gen/*.spv.inl
+gen/generated.h
+mk/
+build/
+vs*/

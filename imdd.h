@@ -299,11 +299,21 @@ void IMDD_VECTORCALL imdd_frustum(
 imdd_shape_store_t *imdd_init(void *mem, uint32_t size)
 {
 	uintptr_t mem_start = (uintptr_t)mem;
-	uintptr_t mem_end = mem_start + size;
+	uintptr_t const mem_end = mem_start + size;
+
+	// align to CPU cacheline
+	uintptr_t const store_align_mask = IMDD_CACHE_LINE_SIZE - 1;
+	mem_start = (mem_start + store_align_mask) & ~store_align_mask;
+	if (mem_start >= mem_end) {
+		return NULL;
+	}
 
 	// take store from memory
 	imdd_shape_store_t *const store = (imdd_shape_store_t *)mem_start;
 	mem_start += sizeof(imdd_shape_store_t);
+	if (mem_start >= mem_end) {
+		return NULL;
+	}
 
 	// use approx 1/8 of the memory for headers
 	imdd_shape_header_t *const header_mem = (imdd_shape_header_t *)mem_start;
@@ -311,20 +321,20 @@ imdd_shape_store_t *imdd_init(void *mem, uint32_t size)
 	mem_start += header_capacity*sizeof(imdd_shape_header_t);
 
 	// and the rest for data
-	uintptr_t const align_mask = sizeof(imdd_v4) - 1;
-	mem_start = (mem_start + align_mask) & ~align_mask;
+	uintptr_t const data_align_mask = sizeof(imdd_v4) - 1;
+	mem_start = (mem_start + data_align_mask) & ~data_align_mask;
+	if (mem_start >= mem_end) {
+		return NULL;
+	}
 	imdd_v4 *const data_mem = (imdd_v4 *)mem_start;
 	uint32_t const data_capacity = (uint32_t)(mem_end - mem_start)/sizeof(imdd_v4);
 
 	// write the store out
-	store->header_store = header_mem;
 	imdd_atomic_store(&store->header_count, 0);
-	store->header_capacity = header_capacity;
-	for (uint32_t i = 0; i < IMDD_SHAPE_BUCKET_COUNT; ++i) {
-		imdd_atomic_store(&store->bucket_sizes[i], 0);
-	}
-	store->data_qw_store = data_mem;
 	imdd_atomic_store(&store->data_qw_count, 0);
+	store->header_store = header_mem;
+	store->data_qw_store = data_mem;
+	store->header_capacity = header_capacity;
 	store->data_qw_capacity = data_capacity;
 	return store;
 }
@@ -333,9 +343,6 @@ void imdd_reset(imdd_shape_store_t *store)
 {
 	// empty the store
 	imdd_atomic_store(&store->header_count, 0);
-	for (uint32_t i = 0; i < IMDD_SHAPE_BUCKET_COUNT; ++i) {
-		imdd_atomic_store(&store->bucket_sizes[i], 0);
-	}
 	imdd_atomic_store(&store->data_qw_count, 0);
 }
 
@@ -348,11 +355,6 @@ void imdd_reserve(
 	uint32_t data_qw_count,
 	void **data)
 {
-	// check for a valid store
-	if (!store) {
-		return;
-	}
-
 	// check for space
 	uint32_t const header_offset = imdd_atomic_fetch_add(&store->header_count, 1);
 	if (header_offset >= store->header_capacity) {
@@ -377,12 +379,6 @@ void imdd_reserve(
 	header.data_qw_offset = data_qw_offset;
 	header.color = color;
 	store->header_store[header_offset] = header;
-
-	// account for an instance of this shape in buckets
-	if (shape < IMDD_SHAPE_COUNT) {
-		uint32_t const bucket_index = imdd_bucket_index_from_shape_header(header);
-		imdd_atomic_fetch_add(&store->bucket_sizes[bucket_index], 1);
-	}
 }
 
 #endif // def IMDD_IMPLEMENTATION

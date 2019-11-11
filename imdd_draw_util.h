@@ -533,6 +533,25 @@ void imdd_mesh_layout_write(
 	Internal API for generating transforms and vertices for shapes.
    ------------------------------------------------------------------------- */
 
+#define IMDD_SHAPE_BUCKET_COUNT		(IMDD_SHAPE_COUNT << 3)
+
+static inline
+uint32_t imdd_bucket_index_from_shape_header(imdd_shape_header_t header)
+{
+	union { imdd_shape_header_t header; uint32_t bits[2]; } u;
+	u.header = header;
+	return u.bits[0] & 0xffU;
+}
+
+static inline
+imdd_shape_header_t imdd_shape_header_from_bucket_index(uint32_t index)
+{
+	union { imdd_shape_header_t header; uint32_t bits[2]; } u;
+	u.bits[0] = index;
+	u.bits[1] = 0;
+	return u.header;
+}
+
 typedef struct {
 	imdd_v4 row0;
 	imdd_v4 row1;
@@ -783,41 +802,53 @@ void imdd_emit_shapes(
 	imdd_batch_t *wire_array_batches,
 	uint32_t *wire_vertex_count)
 {
+	// partition the shapes into buckets and count them
+	uint32_t bucket_sizes[IMDD_SHAPE_BUCKET_COUNT];
+	memset(bucket_sizes, 0, IMDD_SHAPE_BUCKET_COUNT*sizeof(uint32_t));
+	for (uint32_t store_index = 0; store_index < store_count; ++store_index) {
+		imdd_shape_store_t const *const store = stores[store_index];
+		uint32_t header_count = imdd_atomic_load(&store->header_count);
+		for (uint32_t header_offset = 0; header_offset < header_count; ++header_offset) {
+			imdd_shape_header_t const header = store->header_store[header_offset];
+			if (header.shape >= IMDD_SHAPE_COUNT) {
+				continue;
+			}
+			uint32_t const bucket_index = imdd_bucket_index_from_shape_header(header);
+			++bucket_sizes[bucket_index];
+		}
+	}
+
+	// count vertices and instances
 	uint32_t instance_counts[IMDD_INSTANCE_BATCH_COUNT];
 	uint32_t filled_vertex_counts[IMDD_ARRAY_BATCH_COUNT];
 	uint32_t wire_vertex_counts[IMDD_ARRAY_BATCH_COUNT];
 	memset(instance_counts, 0, IMDD_INSTANCE_BATCH_COUNT*sizeof(uint32_t));
 	memset(filled_vertex_counts, 0, IMDD_ARRAY_BATCH_COUNT*sizeof(uint32_t));
 	memset(wire_vertex_counts, 0, IMDD_ARRAY_BATCH_COUNT*sizeof(uint32_t));
+	for (uint32_t bucket_index = 0; bucket_index < IMDD_SHAPE_BUCKET_COUNT; ++bucket_index) {
+		imdd_shape_header_t const header = imdd_shape_header_from_bucket_index(bucket_index);
+		if (header.shape >= IMDD_SHAPE_COUNT) {
+			continue;
+		}
 
-	// count vertices and instances
-	for (uint32_t store_index = 0; store_index < store_count; ++store_index) {
-		imdd_shape_store_t const *const store = stores[store_index];
-		for (uint32_t bucket_index = 0; bucket_index < IMDD_SHAPE_BUCKET_COUNT; ++bucket_index) {
-			imdd_shape_header_t const header = imdd_shape_header_from_bucket_index(bucket_index);
-			if (header.shape >= IMDD_SHAPE_COUNT) {
-				continue;
-			}
+		imdd_emit_desc_t const *const desc = g_imdd_emit_instance_desc + header.shape;
+		imdd_style_enum_t const style = (imdd_style_enum_t)header.style;
+		imdd_blend_enum_t const blend = (imdd_blend_enum_t)header.blend;
+		imdd_zmode_enum_t const zmode = (imdd_zmode_enum_t)header.zmode;
+		uint32_t const bucket_size = bucket_sizes[bucket_index];
 
-			imdd_emit_desc_t const *const desc = g_imdd_emit_instance_desc + header.shape;
-			imdd_style_enum_t const style = (imdd_style_enum_t)header.style;
-			imdd_blend_enum_t const blend = (imdd_blend_enum_t)header.blend;
-			imdd_zmode_enum_t const zmode = (imdd_zmode_enum_t)header.zmode;
-			uint32_t const bucket_size = imdd_atomic_load(&store->bucket_sizes[bucket_index]);
-
-			if (desc->instance_func) {
-				imdd_mesh_enum_t const mesh = g_imdd_mesh_from_shape[header.shape];
-				uint32_t const batch_index = imdd_instance_batch_index(mesh, style, blend, zmode);
-				instance_counts[batch_index] += bucket_size;
-			}
-			if (desc->filled_vertex_func && style == IMDD_STYLE_FILLED) {
-				uint32_t const batch_index = imdd_array_batch_index(blend, zmode);
-				filled_vertex_counts[batch_index] += bucket_size*desc->filled_vertex_count;
-			}
-			if (desc->wire_vertex_func && style == IMDD_STYLE_WIRE) {
-				uint32_t const batch_index = imdd_array_batch_index(blend, zmode);
-				wire_vertex_counts[batch_index] += bucket_size*desc->wire_vertex_count;
-			}
+		if (desc->instance_func) {
+			imdd_mesh_enum_t const mesh = g_imdd_mesh_from_shape[header.shape];
+			uint32_t const batch_index = imdd_instance_batch_index(mesh, style, blend, zmode);
+			instance_counts[batch_index] += bucket_size;
+		}
+		if (desc->filled_vertex_func && style == IMDD_STYLE_FILLED) {
+			uint32_t const batch_index = imdd_array_batch_index(blend, zmode);
+			filled_vertex_counts[batch_index] += bucket_size*desc->filled_vertex_count;
+		}
+		if (desc->wire_vertex_func && style == IMDD_STYLE_WIRE) {
+			uint32_t const batch_index = imdd_array_batch_index(blend, zmode);
+			wire_vertex_counts[batch_index] += bucket_size*desc->wire_vertex_count;
 		}
 	}
 
